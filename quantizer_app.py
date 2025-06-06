@@ -1,6 +1,10 @@
 import tkinter as tk
 from tkinter import messagebox
-from tkinter import ttk  # Import ttk for themed widgets
+from tkinter import ttk
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import tkinter.font as tkFont
 
 # --- Algorithm for Quantization ---
 def compute_quantized_value(max_range, min_range, bit_rate, analog_voltage):
@@ -19,22 +23,16 @@ def compute_quantized_value(max_range, min_range, bit_rate, analog_voltage):
         ValueError: If input parameters are invalid.
     """
     if max_range <= min_range:
-        raise ValueError("Maximum Range must be greater than Minimum Range.")
+        # For computation, if ranges are invalid, map to min_range or handle as error
+        # A proper error should ideally be caught before this call for a meaningful calculation
+        # For plotting, it's handled in _update_quantization_plot
+        return min_range 
     if bit_rate <= 0:
         raise ValueError("Bit Rate must be a positive integer.")
 
-    # The calculation will still proceed even if analog_voltage is out of range
-    # The warning will be shown in the GUI
-    # if not (min_range <= analog_voltage <= max_range):
-    #     pass
-
     num_quantization_levels = 2**bit_rate
-    # Avoid division by zero if only one quantization level (bit_rate=0, though we enforce bit_rate > 0)
-    # or if max_range == min_range.
-    if num_quantization_levels <= 1 or (max_range - min_range) == 0:
-        # If there's effectively only one level or no range, all values map to min_range
-        # or handle as an error based on your desired behavior for such edge cases.
-        # For now, let's make it map to min_range as the only representable value.
+    
+    if num_quantization_levels <= 1: # If only one level, all values map to min_range
         return min_range
     
     step_size = (max_range - min_range) / (num_quantization_levels - 1)
@@ -77,31 +75,59 @@ class QuantizerApp:
         self.field_tooltip_bg = "#E0FFFF" # Light cyan for field explanations
         self.field_tooltip_fg = "#333333"
         
-        # New: Info button colors
+        # Info button colors
         self.info_button_fg_color = "#FFFF00" # Yellow for the question mark
         self.info_button_active_fg_color = "#FFA500" # Orange for hover
 
-        # NEW: Quantized output specific color
+        # Quantized output specific color
         self.quantized_value_color = "#FFFF00" # Bright Yellow for the output number and 'V'
 
-        self.title_font = ("Arial", 18, "bold")
+        # Fonts - Underlined title font
+        self.title_font = tkFont.Font(family="Arial", size=18, weight="bold", underline=True)
         self.label_font = ("Arial", 11)
-        self.entry_font = ("Consolas", 11) # Monospaced font for numbers
+        self.entry_font = ("Consolas", 11)
         self.button_font = ("Arial", 10, "bold")
-        self.output_label_font = ("Arial", 13, "bold") # General output label font
-        self.output_value_font = ("Consolas", 14, "bold") # Larger, bold, monospaced for the value
+        self.output_label_font = ("Arial", 13, "bold")
+        self.output_value_font = ("Consolas", 14, "bold")
         self.tooltip_font = ("Arial", 9)
         self.field_tooltip_font = ("Arial", 9)
         self.close_button_font = ("Arial", 8) # Smaller font for close button
+        self.italic_font = tkFont.Font(family="Arial", size=11, slant="italic") # Increased font for italic text
+
+        # Plot specific colors
+        self.plot_bg_color = "#1e1e1e" # Darker background for plot
+        self.analog_line_color = "#4CAF50" # Green
+        self.quantized_line_color = "#6a90c9" # Blue
+        self.level_line_color = "#FFD700" # Gold/Yellow for quantization levels
 
         # Configure the root window background
         self.master.configure(bg=self.bg_color)
+        
+        # Set a minimum size for the root window to prevent extreme squeezing
+        self.master.minsize(800, 500) 
 
-        # Dictionary to hold Entry widgets for easy access
+        # Configure root window for resizability (main_frame on left, plot_frame on right)
+        self.master.grid_rowconfigure(0, weight=1)
+        self.master.grid_columnconfigure(0, weight=1) # Main frame column
+        self.master.grid_columnconfigure(1, weight=1) # Plot frame column
+        
+        # Bind the <Configure> event to check window state for about button
+        self.master.bind('<Configure>', self._on_window_configure)
+
+        # Dictionary to hold Entry widgets and their associated Tkinter variables
         self.entry_fields = {}
+        self.field_vars = {} # To hold DoubleVar/IntVar for linking entries and sliders
+        self.slider_fields = {} # To hold slider widgets
         self.current_focused_entry = None
-        self.tooltip_window = None # To hold the output tooltip Toplevel window
-        self.field_tooltip_window = None # To hold the field explanation tooltip Toplevel window
+        self.tooltip_window = None
+        self.field_tooltip_window = None
+        self.last_calculated_params = None
+
+        # Matplotlib plot variables
+        self.fig = None
+        self.ax = None
+        self.canvas = None
+        self.toolbar = None
 
         # --- Explanations for each input field ---
         self.field_explanations = {
@@ -113,54 +139,98 @@ class QuantizerApp:
 
         # --- Main Frame for layout and border ---
         self.main_frame = tk.Frame(master, padx=20, pady=20, bd=2, relief="groove", bg=self.frame_bg_color, highlightbackground=self.text_color, highlightthickness=1)
-        self.main_frame.pack(pady=20, padx=20)
+        self.main_frame.grid(row=0, column=0, sticky="nsew", pady=20, padx=20) # Use grid for main window layout
+
+        # --- Plot Frame ---
+        self.plot_frame = tk.Frame(master, bg=self.plot_bg_color)
+        self.plot_frame.grid(row=0, column=1, sticky="nsew", pady=20, padx=(0, 20)) # Use grid for main window layout
+
+        # Configure columns within main_frame for responsiveness
+        self.main_frame.grid_columnconfigure(0, weight=0) # Label column - fixed
+        self.main_frame.grid_columnconfigure(1, weight=1) # Entry column - expands
+        self.main_frame.grid_columnconfigure(2, weight=0) # Unit column - fixed
+        self.main_frame.grid_columnconfigure(3, weight=0) # Button +/-
+        self.main_frame.grid_columnconfigure(4, weight=0) # Button +/-
+        self.main_frame.grid_columnconfigure(5, weight=0) # Button ? / About (flexible)
+        self.main_frame.grid_columnconfigure(6, weight=2) # Slider column - expands more
 
         # --- Title Label ---
-        # Changed columnspan to 6 to accommodate +,-,? buttons
+        # Increased pady for title to give more space
         self.title_label = tk.Label(self.main_frame, text="Analog to Digital Quantizer", font=self.title_font, fg=self.text_color, bg=self.frame_bg_color)
-        self.title_label.grid(row=0, column=0, columnspan=6, pady=(0, 20))
+        self.title_label.grid(row=0, column=0, columnspan=7, pady=(15, 20), sticky="ew") # Spans all 7 columns
 
-        # --- Input Fields and Labels ---
+        # --- About Button (Initially hidden) ---
+        self.about_button = ttk.Button(self.main_frame, text="About", command=self._open_about_dialog, style="TButton")
+        # Don't grid it initially; visibility will be controlled by _on_window_configure
+        self.about_button.grid(row=0, column=6, padx=5, pady=5, sticky="ne") # Placed top right
+        self.about_button.grid_forget() # Hide it at startup
+
+        # --- Input Fields, Labels, and Sliders ---
         input_specs = [
-            ("Maximum Range", "V"),
-            ("Minimum Range", "V"),
-            ("Bit Rate", "Bit"),
-            ("Analog Voltage", "V")
+            ("Maximum Range", "V", 10.0),
+            ("Minimum Range", "V", -10.0),
+            ("Bit Rate", "Bit", 8),
+            ("Analog Voltage", "V", 5.0)
         ]
 
         row_num = 1
-        for text, unit in input_specs:
+        for text, unit, default_value in input_specs:
+            self.main_frame.grid_rowconfigure(row_num, weight=1) # Make input rows expand vertically
             tk.Label(self.main_frame, text=f"{text}:", font=self.label_font, fg=self.text_color, bg=self.frame_bg_color).grid(row=row_num, column=0, sticky="w", pady=5)
 
-            entry = tk.Entry(self.main_frame, width=20, bd=1, relief="solid",
+            # Create Tkinter variable for the field
+            if text == "Bit Rate":
+                var = tk.IntVar(value=default_value)
+                var.trace_add('write', lambda name, index, mode, var=var: self._update_quantization_plot_from_var(var))
+            else:
+                var = tk.DoubleVar(value=default_value)
+                var.trace_add('write', lambda name, index, mode, var=var: self._update_quantization_plot_from_var(var))
+            self.field_vars[text] = var
+
+            entry = tk.Entry(self.main_frame, width=15, bd=1, relief="solid",
                              bg=self.entry_bg_color, fg=self.entry_fg_color,
-                             insertbackground=self.entry_fg_color, # Cursor color
-                             font=self.entry_font)
-            entry.grid(row=row_num, column=1, pady=5, padx=5)
+                             insertbackground=self.entry_fg_color,
+                             font=self.entry_font,
+                             textvariable=var) # Link Entry to variable
+            entry.grid(row=row_num, column=1, pady=5, padx=5, sticky="ew") # Allow entry to expand
 
             tk.Label(self.main_frame, text=unit, font=self.label_font, fg=self.text_color, bg=self.frame_bg_color).grid(row=row_num, column=2, sticky="w")
 
             self.entry_fields[text] = entry
             entry.bind("<FocusIn>", self._on_entry_focus_in)
-            # No permanent info button here
+
+            # Add slider for relevant fields
+            if text in ["Maximum Range", "Minimum Range", "Analog Voltage"]:
+                slider_min = -20.0 
+                slider_max = 20.0 
+
+                slider = ttk.Scale(self.main_frame,
+                                   from_=slider_min, to=slider_max,
+                                   orient="horizontal",
+                                   variable=var, # Link slider to variable
+                                   command=lambda val, var=var: self._update_quantization_plot_from_var(var))
+                slider.grid(row=row_num, column=6, padx=5, pady=5, sticky="ew")
+                self.slider_fields[text] = slider
+                var.set(default_value) # Set initial value after binding everything
+            else:
+                var.set(default_value)
+
             row_num += 1
 
         # --- Configure Button Styles for ttk ---
         style = ttk.Style()
-        style.theme_use('clam') # 'clam' is a good modern-looking theme base
+        style.theme_use('clam')
 
-        # General button style (used for + and -)
         style.configure("TButton",
                         background=self.button_bg_color,
                         foreground=self.button_fg_color,
                         font=self.button_font,
                         padding=5,
-                        relief="flat") # Flat button
+                        relief="flat")
         style.map("TButton",
-                  background=[('active', self.button_active_bg_color)], # Color on hover
-                  foreground=[('active', self.button_fg_color)]) # Text color on hover
+                  background=[('active', self.button_active_bg_color)],
+                  foreground=[('active', self.button_fg_color)])
 
-        # Specific style for Quantize button
         style.configure("Quantize.TButton",
                         background=self.quantize_button_color,
                         foreground=self.button_fg_color)
@@ -168,7 +238,6 @@ class QuantizerApp:
                   background=[('active', self.quantize_button_hover_color)],
                   foreground=[('active', self.button_fg_color)])
 
-        # Specific style for Clear Selection button
         style.configure("Clear.TButton",
                         background=self.clear_button_color,
                         foreground=self.button_fg_color)
@@ -176,7 +245,6 @@ class QuantizerApp:
                   background=[('active', self.clear_button_hover_color)],
                   foreground=[('active', self.button_fg_color)])
 
-        # Small adjustment button style (+/-)
         style.configure("Small.TButton",
                         font=("Arial", 9, "bold"),
                         width=4,
@@ -185,52 +253,60 @@ class QuantizerApp:
                   background=[('active', self.button_active_bg_color)],
                   foreground=[('active', self.button_fg_color)])
         
-        # --- NEW: Info button style (transparent background, yellow text) ---
         style.configure("Info.TButton",
-                        background=self.frame_bg_color, # Match frame background for 'invisible' box
-                        foreground=self.info_button_fg_color, # Yellow text
-                        font=("Arial", 12, "bold"), # Slightly larger for the '?'
-                        width=3, # Smaller width
-                        padding=0, # No padding for invisible box effect
-                        relief="flat") # Flat relief
+                        background=self.frame_bg_color,
+                        foreground=self.info_button_fg_color,
+                        font=("Arial", 12, "bold"),
+                        width=3,
+                        padding=0,
+                        relief="flat")
         style.map("Info.TButton",
-                  background=[('active', self.frame_bg_color)], # Keep background invisible on hover
-                  foreground=[('active', self.info_button_active_fg_color)]) # Orange on hover
+                  background=[('active', self.frame_bg_color)],
+                  foreground=[('active', self.info_button_active_fg_color)])
+        
+        # --- Quantize and Clear Buttons (re-positioned and centered) ---
+        # Create a sub-frame to group and center these buttons
+        self.action_buttons_frame = tk.Frame(self.main_frame, bg=self.frame_bg_color)
+        # Position this frame below the input fields, spanning across columns for centering
+        self.action_buttons_frame.grid(row=row_num, column=0, columnspan=7, pady=(15, 5), sticky="ew")
+        
+        # Configure the columns within this sub-frame to center the buttons
+        self.action_buttons_frame.grid_columnconfigure(0, weight=1) # Left spacer
+        self.action_buttons_frame.grid_columnconfigure(1, weight=0) # Quantize Button
+        self.action_buttons_frame.grid_columnconfigure(2, weight=0) # Clear Button
+        self.action_buttons_frame.grid_columnconfigure(3, weight=1) # Right spacer
 
+        self.quantize_button = ttk.Button(self.action_buttons_frame, text="Quantize", command=self._quantize, width=15, style="Quantize.TButton")
+        self.quantize_button.grid(row=0, column=1, padx=5, pady=5) # Use row 0 within its own frame
 
-        # --- Quantize Button ---
-        # Adjusted columnspan to accommodate 3 dynamic buttons (+,-,?)
-        self.quantize_button = ttk.Button(self.main_frame, text="Quantize", command=self._quantize, width=15, style="Quantize.TButton")
-        self.quantize_button.grid(row=row_num, column=3, columnspan=3, pady=20, padx=10, sticky="e") # Spans 3 columns
+        self.clear_button = ttk.Button(self.action_buttons_frame, text="Clear", command=self._clear_inputs, width=15, style="Clear.TButton")
+        self.clear_button.grid(row=0, column=2, padx=5, pady=5) # Use row 0 within its own frame
 
-        # --- Clear Selection Button ---
-        self.clear_button = ttk.Button(self.main_frame, text="Clear Selection", command=self._clear_inputs, width=15, style="Clear.TButton")
-        self.clear_button.grid(row=row_num + 1, column=3, columnspan=3, pady=5, padx=10, sticky="e") # Spans 3 columns
+        row_num += 1 # Increment row_num for elements below action buttons frame
+
 
         # --- Output Section ---
-        # This section will hold two labels for separate coloring
         self.output_frame = tk.Frame(self.main_frame, bg=self.frame_bg_color)
-        self.output_frame.grid(row=row_num + 2, column=0, columnspan=6, pady=20, sticky="w")
+        self.output_frame.grid(row=row_num + 1, column=0, columnspan=7, pady=20, sticky="ew") # Spans all 7 columns
 
         # Label for the static "Quantized Voltage:" text
         self.output_label_prefix = tk.Label(self.output_frame, text="Quantized Voltage: ",
                                             font=self.output_label_font,
                                             fg=self.text_color, bg=self.frame_bg_color)
-        self.output_label_prefix.pack(side=tk.LEFT, padx=(0,0)) # No right padding
+        self.output_label_prefix.pack(side=tk.LEFT, padx=(0,0))
 
         # Label for the dynamic value and unit (will be yellow)
         self.output_value_text = tk.StringVar()
-        self.output_value_text.set("N/A") # Default value
+        self.output_value_text.set("N/A")
         self.output_label_value = tk.Label(self.output_frame, textvariable=self.output_value_text,
                                            font=self.output_value_font,
-                                           fg=self.quantized_value_color, # Yellow color for this part
+                                           fg=self.quantized_value_color,
                                            bg=self.frame_bg_color)
         self.output_label_value.pack(side=tk.LEFT)
 
         # --- Bind hover events to the output frame for the tooltip ---
         self.output_frame.bind("<Enter>", self._show_output_analysis_tooltip)
         self.output_frame.bind("<Leave>", self._hide_output_analysis_tooltip)
-        # Also bind children labels, so hover works over the whole output text
         self.output_label_prefix.bind("<Enter>", self._show_output_analysis_tooltip)
         self.output_label_prefix.bind("<Leave>", self._hide_output_analysis_tooltip)
         self.output_label_value.bind("<Enter>", self._show_output_analysis_tooltip)
@@ -242,19 +318,227 @@ class QuantizerApp:
         self.dec_button = ttk.Button(self.main_frame, text="-", command=lambda: self._adjust_value(-1), style="Small.TButton")
         self.info_button = ttk.Button(self.main_frame, text="?", command=self._trigger_field_tooltip, style="Info.TButton")
 
-        # Initially hide them
         self.inc_button.grid_forget()
         self.dec_button.grid_forget()
         self.info_button.grid_forget()
 
         self.master.bind("<Button-1>", self._on_window_click)
 
+        # Initialize the quantization plot
+        self._create_quantization_plot()
+        self._update_quantization_plot() # Initial plot draw with default values
 
-    # --- New: Helper to trigger field tooltip from info button ---
+
+    # --- New: About Dialog ---
+    def _open_about_dialog(self):
+        """Opens a Toplevel window with information about the application."""
+        about_window = tk.Toplevel(self.master)
+        about_window.title("About Analog to Digital Quantizer") # This title is for the OS window frame
+        about_window.transient(self.master) # Make it appear on top of the main window
+        about_window.grab_set() # Prevent interaction with main window until closed
+        about_window.resizable(False, False) # Don't allow resizing
+        about_window.configure(bg=self.bg_color)
+
+        # Center the about window relative to the main window
+        # Increased width and height to fit more info
+        about_window_width = 450
+        about_window_height = 450 
+        self.master.update_idletasks() # Ensure sizes are calculated
+        x = self.master.winfo_x() + (self.master.winfo_width() // 2) - (about_window_width // 2)
+        y = self.master.winfo_y() + (self.master.winfo_height() // 2) - (about_window_height // 2)
+        about_window.geometry(f"{about_window_width}x{about_window_height}+{x}+{y}")
+
+
+        # Changed title inside the white section as requested
+        tk.Label(about_window, text="About this Quantizer", font=("Arial", 12, "bold"), fg=self.text_color, bg=self.bg_color).pack(pady=10)
+        # Increased font size for version and developer info
+        tk.Label(about_window, text="Version: 1.2.0", font=("Arial", 11), fg=self.text_color, bg=self.bg_color).pack()
+        tk.Label(about_window, text="Developed by Tiso.", font=("Arial", 11), fg=self.text_color, bg=self.bg_color).pack() # Updated author
+        
+        # New italicized, centered text (font already increased in __init__)
+        tk.Label(about_window, text="its simply just like any calculator", font=self.italic_font, fg=self.text_color, bg=self.bg_color).pack(pady=(5, 5))
+
+        # Increased font size for "How to use:" title
+        tk.Label(about_window, text="\nHow to use:", font=("Arial", 11, "bold"), fg=self.text_color, bg=self.bg_color).pack(pady=(10, 0))
+        instructions = (
+            "1. Adjust 'Max/Min Range' and 'Bit Rate' using the entry boxes, sliders, or +/- buttons.\n"
+            "2. Observe the real-time plot showing how quantization levels change.\n"
+            "3. Enter an 'Analog Voltage' or use its slider to see its quantized output.\n"
+            "4. Click 'Quantize' to get the final numerical result.\n"
+            "5. Hover over the output for detailed analysis.\n"
+            "6. You can save the graph as an image using the save icon (floppy disk) in the plot toolbar."
+        )
+        # Adjusted wraplength to fit the new width and increased font size for instructions
+        tk.Label(about_window, text=instructions, wraplength=400, justify=tk.LEFT, font=("Arial", 11), fg=self.text_color, bg=self.bg_color).pack(padx=15, pady=5)
+        
+        # Close button at the bottom, centered with adequate padding
+        ttk.Button(about_window, text="Close", command=about_window.destroy, style="TButton").pack(pady=(15, 10))
+
+        # Focus the dialog and wait until it's closed
+        self.master.wait_window(about_window)
+
+
+    # --- Matplotlib Plotting Methods ---
+    def _create_quantization_plot(self):
+        """Initializes the Matplotlib plot and embeds it in the Tkinter frame."""
+        self.fig, self.ax = plt.subplots(figsize=(6, 4), dpi=100)
+        self.fig.patch.set_facecolor(self.plot_bg_color)
+        self.ax.set_facecolor(self.plot_bg_color)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.plot_frame, pack_toolbar=False)
+        self.toolbar.update()
+        self.toolbar.pack(side=tk.BOTTOM, fill=tk.X, anchor="s")
+
+        self.ax.set_title("Quantization Visualization", color=self.text_color)
+        self.ax.set_xlabel("Time", color=self.text_color)
+        self.ax.set_ylabel("Voltage (V)", color=self.text_color)
+        
+        self.ax.tick_params(axis='x', colors=self.text_color)
+        self.ax.tick_params(axis='y', colors=self.text_color)
+        self.ax.spines['bottom'].set_color(self.text_color)
+        self.ax.spines['left'].set_color(self.text_color)
+        self.ax.spines['top'].set_color(self.text_color)
+        self.ax.spines['right'].set_color(self.text_color)
+
+        self.ax.plot(np.linspace(0, 1, 100), np.sin(np.linspace(0, 2 * np.pi, 100)), color=self.analog_line_color, label='Analog Signal')
+        self.ax.set_ylim(-1.5, 1.5)
+        
+        # --- Legend placement change ---
+        # This places the legend outside the plot area, to the right.
+        # bbox_to_anchor=(1.02, 1) means just outside the top-right corner.
+        # borderaxespad=0 means no padding between legend and axes.
+        self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False, labelcolor=self.text_color)
+        
+        # Adjust subplot parameters to make room for the legend
+        self.fig.subplots_adjust(right=0.75) # Reduce right margin to fit legend
+
+        self.fig.tight_layout()
+
+
+    def _update_quantization_plot_from_var(self, var):
+        """
+        Callback for Tkinter variables. Triggers plot update.
+        Needed because trace_add doesn't pass a fixed event object.
+        """
+        self._update_quantization_plot()
+
+    def _update_quantization_plot(self):
+        """Updates the quantization visualization based on current input values."""
+        if not self.fig or not self.ax:
+            return
+
+        self.ax.clear()
+
+        # Reset plot aesthetics after clearing
+        self.ax.set_facecolor(self.plot_bg_color)
+        self.ax.set_title("Quantization Visualization", color=self.text_color)
+        self.ax.set_xlabel("Time", color=self.text_color)
+        self.ax.set_ylabel("Voltage (V)", color=self.text_color)
+        self.ax.tick_params(axis='x', colors=self.text_color)
+        self.ax.tick_params(axis='y', colors=self.text_color)
+        self.ax.spines['bottom'].set_color(self.text_color)
+        self.ax.spines['left'].set_color(self.text_color)
+        self.ax.spines['top'].set_color(self.text_color)
+        self.ax.spines['right'].set_color(self.text_color)
+        
+        try:
+            # Get values directly from Tkinter variables
+            max_r = self.field_vars["Maximum Range"].get()
+            min_r = self.field_vars["Minimum Range"].get()
+            bit_r = self.field_vars["Bit Rate"].get()
+            analog_v_single_point = self.field_vars["Analog Voltage"].get()
+
+            # Basic validation for plot rendering
+            if max_r <= min_r:
+                self.ax.text(0.5, 0.5, "Error: Max Range must be > Min Range", ha='center', va='center', color='red', transform=self.ax.transAxes)
+                self.ax.set_ylim(-1.5, 1.5)
+                self.ax.set_xlim(0, 2*np.pi)
+                # Ensure legend is still drawn even on error
+                self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False, labelcolor=self.text_color)
+                self.fig.subplots_adjust(right=0.75)
+                self.canvas.draw()
+                return 
+
+            bit_r = max(1, bit_r) # Minimum 1 bit for plot logic
+
+            # Update slider ranges for Analog Voltage dynamically
+            if "Analog Voltage" in self.slider_fields:
+                # Ensure slider 'from_' is not greater than 'to_'
+                if min_r < max_r:
+                    self.slider_fields["Analog Voltage"].config(from_=min_r, to=max_r)
+                else: # Fallback for invalid ranges, maybe set a default or disable
+                    self.slider_fields["Analog Voltage"].config(from_=min_r, to=min_r + 0.1) # Small valid range
+
+                # Keep the analog voltage within the new range
+                current_analog_v = self.field_vars["Analog Voltage"].get()
+                if not (min_r <= current_analog_v <= max_r):
+                    # Snap to nearest valid point if outside new range
+                    if current_analog_v < min_r: self.field_vars["Analog Voltage"].set(min_r)
+                    if current_analog_v > max_r: self.field_vars["Analog Voltage"].set(max_r)
+
+
+            # Generate a sine wave as the analog signal
+            time = np.linspace(0, 2 * np.pi, 200)
+            analog_signal = np.sin(time) * ((max_r - min_r) / 2) + (max_r + min_r) / 2
+            
+            self.ax.plot(time, analog_signal, color=self.analog_line_color, label='Analog Signal')
+
+            # Calculate quantization levels
+            num_levels = 2**bit_r
+            if num_levels == 1:
+                quantization_levels = [min_r]
+            else:
+                quantization_levels = np.linspace(min_r, max_r, num_levels)
+
+            for level in quantization_levels:
+                self.ax.axhline(level, color=self.level_line_color, linestyle='--', linewidth=0.7, alpha=0.6)
+
+            # Quantize the analog signal
+            quantized_signal = []
+            for val in analog_signal:
+                quantized_val = compute_quantized_value(max_r, min_r, bit_r, val)
+                quantized_signal.append(quantized_val)
+
+            self.ax.step(time, quantized_signal, where='mid', color=self.quantized_line_color, label='Quantized Signal')
+
+            # Mark the specific input analog voltage if within range
+            # Removed direct plot of analog_v_single_point line, using text instead for clarity
+            if min_r <= analog_v_single_point <= max_r:
+                 quantized_single_point = compute_quantized_value(max_r, min_r, bit_r, analog_v_single_point)
+                 # Mark input point with an 'X'
+                 self.ax.plot(time[0], analog_v_single_point, 'x', color='red', markersize=10, mew=2, label='Current Input')
+                 # Mark quantized output point with an 'O'
+                 self.ax.plot(time[0], quantized_single_point, 'o', color='yellow', markersize=10, label='Quantized Output') 
+                 self.ax.annotate(f"{quantized_single_point:.2f}V", (time[0], quantized_single_point),
+                                  textcoords="offset points", xytext=(10,10), ha='left', va='bottom', color='yellow')
+
+
+            self.ax.set_ylim(min_r - 0.1 * abs(max_r - min_r), max_r + 0.1 * abs(max_r - min_r))
+            self.ax.set_xlim(0, 2 * np.pi) # Ensure x-axis limits are consistent
+
+        except ValueError as e:
+            self.ax.text(0.5, 0.5, f"Invalid Numerical Input: {e}", ha='center', va='center', color='red', transform=self.ax.transAxes)
+            self.ax.set_ylim(-1.5, 1.5)
+            self.ax.set_xlim(0, 2*np.pi)
+        except Exception as e:
+            self.ax.text(0.5, 0.5, f"Plot Error: {e}", ha='center', va='center', color='red', transform=self.ax.transAxes)
+            self.ax.set_ylim(-1.5, 1.5)
+            self.ax.set_xlim(0, 2*np.pi)
+
+        # --- Legend placement (repeated after clear to ensure it's always set) ---
+        self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False, labelcolor=self.text_color)
+        self.fig.subplots_adjust(right=0.75) # Adjust right margin to fit legend
+        self.fig.tight_layout() # Call tight_layout last
+        self.canvas.draw()
+
+
+    # --- Rest of your existing methods (with minor adjustments for variable use) ---
     def _trigger_field_tooltip(self):
-        """Triggers the field tooltip for the currently focused entry."""
         if self.current_focused_entry:
-            # Find the field name corresponding to the current focused entry
             field_name = None
             for name, entry_widget in self.entry_fields.items():
                 if entry_widget == self.current_focused_entry:
@@ -263,11 +547,8 @@ class QuantizerApp:
             if field_name:
                 self._show_field_tooltip(field_name, self.current_focused_entry)
 
-
-    # --- Modified Method for Field-Specific Tooltips (now triggered by Info Button) ---
     def _show_field_tooltip(self, field_name, entry_widget):
-        """Displays a tooltip explanation for a specific input field."""
-        if self.field_tooltip_window: # Hide any existing field tooltip
+        if self.field_tooltip_window:
             self._hide_field_tooltip()
 
         if not field_name or field_name not in self.field_explanations:
@@ -275,19 +556,22 @@ class QuantizerApp:
 
         tooltip_message = self.field_explanations[field_name]
 
-        # Get coordinates of the entry widget to position the tooltip
         x = entry_widget.winfo_rootx()
         y = entry_widget.winfo_rooty()
         
-        # Calculate position for tooltip (relative to the entry field)
-        tooltip_x = x + entry_widget.winfo_width() + 60 # Increased offset
-        tooltip_y = y - 10 # Slightly above the entry field
+        # Position tooltip to the right of the info button (column 5)
+        # Assuming info button is column 5, and its width is small.
+        # We need to find its root x and y
+        info_button_x = self.info_button.winfo_rootx()
+        info_button_y = self.info_button.winfo_rooty()
+        
+        tooltip_x = info_button_x + self.info_button.winfo_width() + 10 # 10 pixels padding
+        tooltip_y = info_button_y # Align top with button
 
         self.field_tooltip_window = tk.Toplevel(self.master)
         self.field_tooltip_window.wm_overrideredirect(True)
         self.field_tooltip_window.wm_geometry(f"+{tooltip_x}+{tooltip_y}")
 
-        # Frame to hold the label and the close button
         tooltip_frame = tk.Frame(self.field_tooltip_window,
                                  background=self.field_tooltip_bg,
                                  relief="solid", borderwidth=1)
@@ -298,36 +582,30 @@ class QuantizerApp:
                          font=self.field_tooltip_font,
                          justify=tk.LEFT,
                          padx=7, pady=5,
-                         wraplength=280) # Wrap text for better readability
+                         wraplength=280)
         label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # --- Add a Close button to the field tooltip ---
         close_button = ttk.Button(tooltip_frame, text="Close",
                                   command=self._hide_field_tooltip,
-                                  style="TButton") # Use general TButton style
+                                  style="TButton")
         close_button.pack(side=tk.BOTTOM, pady=5, padx=5)
 
     def _hide_field_tooltip(self):
-        """Hides the field explanation tooltip."""
         if self.field_tooltip_window:
             self.field_tooltip_window.destroy()
             self.field_tooltip_window = None
 
-    # --- Renamed and Enhanced Method for Output Analysis Tooltip ---
     def _show_output_analysis_tooltip(self, event):
-        """Displays a tooltip text box with analysis of the quantized output."""
-        if self.tooltip_window: # Don't show tooltip if already visible
+        if self.tooltip_window:
             return
 
-        current_output_str = self.output_value_text.get().strip() # Get from output_value_text
+        current_output_str = self.output_value_text.get().strip()
         
-        # Only show tooltip if there's a valid numerical output and calculation params exist
         if not current_output_str or current_output_str in ["N/A", "Error"] or self.last_calculated_params is None:
             return
 
-        tooltip_message = "" # Start with an empty message for structured content
+        tooltip_message = ""
         
-        # --- Dynamic commentary based on quantization parameters ---
         try:
             max_r = self.last_calculated_params["max_range"]
             min_r = self.last_calculated_params["min_range"]
@@ -345,33 +623,30 @@ class QuantizerApp:
                 tooltip_message += f"- Voltage Step Size: {step_size:.4f} V. This is the smallest change in voltage that can be represented. A smaller step size means a more accurate representation of the analog signal.\n"
 
                 tooltip_message += "\n**Theoretical Sound Quality:**\n"
-                if bit_r <= 7: # Very low bit rates, likely to have significant noise
+                if bit_r <= 7:
                     tooltip_message += "- With very low bit rates (e.g., 1-7 bits), quantization steps are very large. This can lead to severe 'quantization noise' and a highly 'steppy' or 'grainy' sound, particularly noticeable in quiet passages. The digital representation will have a very limited dynamic range, resulting in a 'crude' or 'lo-fi' audio feel. Imagine an extremely basic digital recording.\n"
-                elif 8 <= bit_r <= 11: # Medium-low, still perceptible noise
+                elif 8 <= bit_r <= 11:
                     tooltip_message += "- At this bit rate, quantization noise is still quite perceptible, especially on quiet sounds or decays. The audio may lack smoothness and sound somewhat 'harsh' or 'digital'. It's often used for speech or less critical audio where file size is paramount (e.g., telephone audio or older multimedia presentations).\n"
-                elif 12 <= bit_r <= 15: # Good for general use, but not "audiophile"
+                elif 12 <= bit_r <= 15:
                     tooltip_message += "- This range offers a good balance. Quantization noise is significantly reduced and often imperceptible to the average listener for most audio. The sound should be clear and generally pleasant, though critical listening might reveal minor imperfections in very high-fidelity recordings. This would be typical for many streaming services or good quality compressed audio.\n"
-                else: # 16 bits or higher (CD quality and beyond)
+                else:
                     tooltip_message += "- With 16 bits or more, the quantization noise is extremely low and generally below the threshold of human hearing (the 'noise floor'). This results in a very smooth, accurate, and high-fidelity digital representation. The sound should be clean, detailed, and have excellent dynamic range, comparable to professional audio recordings or CD quality (16-bit, 44.1 kHz).\n"
                     
-                # Check for clipping (if analog voltage is out of range)
                 if not (min_r <= analog_v <= max_r):
-                    tooltip_message += "\n*Warning: Input Clipping*\n" # Subheading for warning
+                    tooltip_message += "\n*Warning: Input Clipping*\n"
                     tooltip_message += "- The input analog voltage was outside the specified range. This would result in 'clipping' during conversion, leading to severe audible distortion at the peaks of the signal (flat-topping or flat-bottoming). This sounds like a harsh, fuzzy distortion, especially on loud sounds.\n"
 
-            else: # If only one level or invalid range (e.g., bit_rate = 0, or max_r == min_r)
+            else:
                 tooltip_message += "**Quantization Feedback:**\n"
                 tooltip_message += "- With very few bits or an invalid voltage range, the system cannot accurately represent a varying analog signal. The output will likely be highly distorted, clipped, or simply a constant value, leading to severe loss of audio information. The resulting 'sound' would be unusable.\n"
 
-        except (ValueError, KeyError): # Handle cases where last_calculated_params might be incomplete or invalid
+        except (ValueError, KeyError):
             tooltip_message += "\n(Cannot provide detailed feedback due to missing or invalid input values from the last calculation.)\n"
         except Exception as e:
             tooltip_message += f"\n(Error generating detailed feedback: {e})\n"
 
-        # Remove trailing newlines from the message for cleaner presentation
         tooltip_message = tooltip_message.strip()
 
-        # Create a Toplevel window for the tooltip
         self.tooltip_window = tk.Toplevel(self.master)
         self.tooltip_window.wm_overrideredirect(True)
         self.tooltip_window.wm_geometry(f"+{event.x_root + 15}+{event.y_root + 15}")
@@ -381,36 +656,39 @@ class QuantizerApp:
                          relief="solid", borderwidth=1,
                          font=self.tooltip_font,
                          justify=tk.LEFT,
-                         padx=10, pady=7, # Increased padding for better appearance
-                         wraplength=400) # Increased wraplength for more content
+                         padx=10, pady=7,
+                         wraplength=400)
         label.pack()
 
     def _hide_output_analysis_tooltip(self, event):
-        """Hides the output analysis tooltip text box."""
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
     def _on_entry_focus_in(self, event):
-        """Called when an Entry widget gains focus."""
         self._hide_field_tooltip()
         self.current_focused_entry = event.widget
         grid_info = self.current_focused_entry.grid_info()
         row = grid_info['row']
 
-        # --- Grid the +, -, and ? buttons dynamically ---
-        self.inc_button.grid(row=row, column=3, padx=2, sticky="w") # Column 3
-        self.dec_button.grid(row=row, column=4, padx=2, sticky="w") # Column 4
-        self.info_button.grid(row=row, column=5, padx=2, sticky="w") # Column 5
+        # Place buttons relative to the focused entry
+        self.inc_button.grid(row=row, column=3, padx=2, sticky="w")
+        self.dec_button.grid(row=row, column=4, padx=2, sticky="w")
+        self.info_button.grid(row=row, column=5, padx=2, sticky="w")
 
     def _on_window_click(self, event):
-        """Called when a click occurs anywhere on the main window."""
         is_entry = isinstance(event.widget, tk.Entry)
         is_inc_button = (event.widget == self.inc_button.winfo_containing(event.x_root, event.y_root))
         is_dec_button = (event.widget == self.dec_button.winfo_containing(event.x_root, event.y_root))
         is_info_button = (event.widget == self.info_button.winfo_containing(event.x_root, event.y_root))
 
-        # Check if the click was on any tooltip window itself
+        # Check if click was on a slider
+        is_slider = False
+        for s in self.slider_fields.values():
+            if s.winfo_containing(event.x_root, event.y_root) == s:
+                is_slider = True
+                break
+
         is_tooltip_click = False
         if self.tooltip_window:
             tooltip_x1 = self.tooltip_window.winfo_x()
@@ -428,16 +706,37 @@ class QuantizerApp:
             if field_tooltip_x1 <= event.x_root <= field_tooltip_x2 and field_tooltip_y1 <= event.y_root <= field_tooltip_y2:
                 is_tooltip_click = True
 
-        # If click is not on entry, adjustment buttons, or any tooltip, hide buttons and tooltips
-        if not (is_entry or is_inc_button or is_dec_button or is_info_button or is_tooltip_click):
+        is_plot_click = False
+        if self.canvas_widget:
+            # winfo_rootx/y give absolute screen coordinates
+            plot_x1 = self.canvas_widget.winfo_rootx()
+            plot_y1 = self.canvas_widget.winfo_rooty()
+            plot_x2 = plot_x1 + self.canvas_widget.winfo_width()
+            plot_y2 = plot_y1 + self.canvas_widget.winfo_height()
+            if plot_x1 <= event.x_root <= plot_x2 and plot_y1 <= event.y_root <= plot_y2:
+                is_plot_click = True
+        
+        if self.toolbar:
+            toolbar_x1 = self.toolbar.winfo_rootx()
+            toolbar_y1 = self.toolbar.winfo_y() # Use winfo_y for relative to parent
+            toolbar_x2 = toolbar_x1 + self.toolbar.winfo_width()
+            toolbar_y2 = toolbar_y1 + self.toolbar.winfo_height()
+            # Convert event.x/y to coordinates relative to the toolbar's root for precise check
+            # This is complex, simply check if the click is within the toolbar's *absolute screen* bounds.
+            if toolbar_x1 <= event.x_root <= toolbar_x2 and toolbar_y1 <= event.y_root <= toolbar_y2:
+                is_plot_click = True
+        
+        is_about_button_click = (event.widget == self.about_button.winfo_containing(event.x_root, event.y_root))
+
+
+        if not (is_entry or is_inc_button or is_dec_button or is_info_button or is_tooltip_click or is_plot_click or is_slider or is_about_button_click):
             self._hide_adjustment_buttons()
-            self._hide_output_analysis_tooltip(event)
+            self._hide_output_analysis_tooltip(None)
             self._hide_field_tooltip()
             self.master.focus_set()
 
 
     def _hide_adjustment_buttons(self):
-        """Hides the increment/decrement and info buttons."""
         if self.inc_button.winfo_ismapped():
             self.inc_button.grid_forget()
         if self.dec_button.winfo_ismapped():
@@ -448,46 +747,54 @@ class QuantizerApp:
 
 
     def _adjust_value(self, delta):
-        """Adjusts the numeric value of the currently focused entry."""
         if self.current_focused_entry:
-            try:
-                current_value_str = self.current_focused_entry.get()
-
-                is_bit_rate_field = False
-                for field_name, entry_widget in self.entry_fields.items():
-                    if entry_widget == self.current_focused_entry and field_name == "Bit Rate":
-                        is_bit_rate_field = True
-                        break
-
-                if is_bit_rate_field:
-                    current_value = int(current_value_str) if current_value_str else 0
-                    new_value = current_value + delta
-                    if new_value < 1:
-                        new_value = 1
-                    self.current_focused_entry.delete(0, tk.END)
-                    self.current_focused_entry.insert(0, str(int(new_value)))
-                else:
-                    current_value = float(current_value_str) if current_value_str else 0.0
-                    new_value = current_value + delta
-                    self.current_focused_entry.delete(0, tk.END)
-                    self.current_focused_entry.insert(0, f"{new_value:.1f}")
-
-            except ValueError:
-                messagebox.showerror("Input Error", "Please enter a valid number in the selected field before adjusting.")
+            field_name = None
+            for name, entry_widget in self.entry_fields.items():
+                if entry_widget == self.current_focused_entry:
+                    field_name = name
+                    break
+            
+            if field_name:
+                try:
+                    current_var = self.field_vars[field_name]
+                    current_value = current_var.get()
+                    
+                    if field_name == "Bit Rate":
+                        new_value = int(current_value) + delta
+                        if new_value < 1:
+                            new_value = 1
+                        current_var.set(new_value)
+                    else:
+                        new_value = float(current_value) + delta
+                        current_var.set(f"{new_value:.1f}") # Ensure float format for entry
+                    
+                except ValueError:
+                    messagebox.showerror("Input Error", "Please enter a valid number in the selected field before adjusting.")
+            else:
+                messagebox.showinfo("Selection", "Please select an input field to adjust.")
 
 
     def _quantize(self):
-        """Retrieves input values, computes quantized value, and displays it."""
-        # Hide any active tooltips when a calculation is performed or cleared
         self._hide_output_analysis_tooltip(None)
         self._hide_field_tooltip()
         try:
-            max_r = float(self.entry_fields["Maximum Range"].get())
-            min_r = float(self.entry_fields["Minimum Range"].get())
-            bit_r = int(self.entry_fields["Bit Rate"].get())
-            analog_v = float(self.entry_fields["Analog Voltage"].get())
+            max_r = self.field_vars["Maximum Range"].get()
+            min_r = self.field_vars["Minimum Range"].get()
+            bit_r = self.field_vars["Bit Rate"].get()
+            analog_v = self.field_vars["Analog Voltage"].get()
 
-            # Store these values for the tooltip analysis
+            # Robust type checking and conversion
+            max_r = float(max_r) if isinstance(max_r, (int, float)) else float(str(max_r))
+            min_r = float(min_r) if isinstance(min_r, (int, float)) else float(str(min_r))
+            bit_r = int(bit_r) if isinstance(bit_r, int) else int(str(bit_r))
+            analog_v = float(analog_v) if isinstance(analog_v, (int, float)) else float(str(analog_v))
+
+            if bit_r <= 0:
+                raise ValueError("Bit Rate must be a positive integer.")
+            if max_r <= min_r:
+                raise ValueError("Maximum Range must be greater than Minimum Range.")
+
+
             self.last_calculated_params = {
                 "max_range": max_r,
                 "min_range": min_r,
@@ -497,32 +804,55 @@ class QuantizerApp:
 
             quantized_val = compute_quantized_value(max_r, min_r, bit_r, analog_v)
 
-            # Update the separate output_label_value
             self.output_value_text.set(f"{quantized_val:.4f} V")
 
             if not (min_r <= analog_v <= max_r):
                 messagebox.showwarning("Input Warning",
                                        f"Analog voltage ({analog_v}V) is outside the specified range ({min_r}V to {max_r}V).\n"
                                        "Quantization has proceeded, but results might be unexpected if this is not intended.")
+            
+            self._update_quantization_plot()
 
         except ValueError as e:
-            messagebox.showerror("Input Error", f"Please ensure all fields have valid numbers. Details: {e}")
-            self.output_value_text.set("N/A") # Set only the value part
-            self.last_calculated_params = None # Clear params if calculation failed
+            messagebox.showerror("Input Error", f"Please ensure all fields have valid numbers and ranges. Details: {e}")
+            self.output_value_text.set("N/A")
+            self.last_calculated_params = None
+            self._update_quantization_plot()
         except Exception as e:
             messagebox.showerror("Calculation Error", f"An unexpected error occurred during quantization: {e}")
-            self.output_value_text.set("Error") # Set only the value part
-            self.last_calculated_params = None # Clear params if calculation failed
+            self.output_value_text.set("Error")
+            self.last_calculated_params = None
+            self._update_quantization_plot()
 
     def _clear_inputs(self):
-        """Clears all input fields and the output display."""
-        for entry in self.entry_fields.values():
-            entry.delete(0, tk.END)
-        self.output_value_text.set("N/A") # Clear only the value part
+        for text_field in self.field_vars:
+            if text_field == "Bit Rate":
+                self.field_vars[text_field].set(8) # Default bit rate
+            elif text_field == "Maximum Range":
+                self.field_vars[text_field].set(10.0) # Default max range
+            elif text_field == "Minimum Range":
+                self.field_vars[text_field].set(-10.0) # Default min range
+            elif text_field == "Analog Voltage":
+                self.field_vars[text_field].set(5.0) # Default analog voltage
+
+        self.output_value_text.set("N/A")
         self._hide_adjustment_buttons()
         self._hide_output_analysis_tooltip(None)
         self._hide_field_tooltip()
         self.last_calculated_params = None
+        self._update_quantization_plot()
+
+    def _on_window_configure(self, event):
+        """
+        Handles window configuration events to control About button visibility.
+        """
+        # Only act if the event is from the root window itself and not its children
+        if event.widget == self.master:
+            current_state = self.master.state()
+            if current_state == 'zoomed': # Maximized state
+                self.about_button.grid(row=0, column=6, padx=5, pady=5, sticky="ne")
+            else: # Normal or iconic (minimized)
+                self.about_button.grid_forget()
 
 
 # --- Main execution ---
