@@ -79,8 +79,15 @@ class QuantizerApp:
         self.info_button_fg_color = "#FFFF00" # Yellow for the question mark
         self.info_button_active_fg_color = "#FFA500" # Orange for hover
 
-        # Quantized output specific color
-        self.quantized_value_color = "#FFFF00" # Bright Yellow for the output number and 'V'
+        # Quantized output specific color (GUI text and plot marker/label)
+        # This color is for the GUI output label when a value is displayed
+        self.quantized_value_color = "#FFFF00" # Changed to Yellow as requested
+        
+        # This color is for the 'N/A' output text (now same as quantized_value_color)
+        self.na_color = "#FFFF00" # Pure Yellow
+
+        # Color specifically for the quantized output point on the graph
+        self.quantized_graph_output_color = "#9400D3" # DarkViolet (Purple)
 
         # Fonts - Underlined title font
         self.title_font = tkFont.Font(family="Arial", size=18, weight="bold", underline=True)
@@ -96,9 +103,9 @@ class QuantizerApp:
 
         # Plot specific colors
         self.plot_bg_color = "#1e1e1e" # Darker background for plot
-        self.analog_line_color = "#4CAF50" # Green
-        self.quantized_line_color = "#6a90c9" # Blue
-        self.level_line_color = "#FFD700" # Gold/Yellow for quantization levels
+        self.analog_line_color = "#32CD32" # Changed to Lime Green as requested
+        self.quantized_line_color = "#FF0000" # Changed to Bright Red as requested
+        self.level_line_color = "#DDDDDD" # Very Light Gray for quantization levels (remains)
 
         # Configure the root window background
         self.master.configure(bg=self.bg_color)
@@ -128,6 +135,7 @@ class QuantizerApp:
         self.ax = None
         self.canvas = None
         self.toolbar = None
+        self._quantized_output_text_label = None # To hold the plot text object
 
         # --- Explanations for each input field ---
         self.field_explanations = {
@@ -295,12 +303,12 @@ class QuantizerApp:
                                             fg=self.text_color, bg=self.frame_bg_color)
         self.output_label_prefix.pack(side=tk.LEFT, padx=(0,0))
 
-        # Label for the dynamic value and unit (will be yellow)
+        # Label for the dynamic value and unit (will now always be yellow)
         self.output_value_text = tk.StringVar()
         self.output_value_text.set("N/A")
         self.output_label_value = tk.Label(self.output_frame, textvariable=self.output_value_text,
                                            font=self.output_value_font,
-                                           fg=self.quantized_value_color,
+                                           fg=self.na_color, # Start with yellow for N/A
                                            bg=self.frame_bg_color)
         self.output_label_value.pack(side=tk.LEFT)
 
@@ -413,8 +421,8 @@ class QuantizerApp:
         # borderaxespad=0 means no padding between legend and axes.
         self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False, labelcolor=self.text_color)
         
-        # Adjust subplot parameters to make room for the legend
-        self.fig.subplots_adjust(right=0.75) # Reduce right margin to fit legend
+        # Adjust subplot parameters to make room for the legend and new text
+        self.fig.subplots_adjust(right=0.8) # Increased right margin
 
         self.fig.tight_layout()
 
@@ -430,6 +438,11 @@ class QuantizerApp:
         """Updates the quantization visualization based on current input values."""
         if not self.fig or not self.ax:
             return
+
+        # Clear existing text label if it exists
+        if hasattr(self, '_quantized_output_text_label') and self._quantized_output_text_label:
+            self._quantized_output_text_label.remove()
+            self._quantized_output_text_label = None # Clear reference
 
         self.ax.clear()
 
@@ -459,7 +472,7 @@ class QuantizerApp:
                 self.ax.set_xlim(0, 2*np.pi)
                 # Ensure legend is still drawn even on error
                 self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False, labelcolor=self.text_color)
-                self.fig.subplots_adjust(right=0.75)
+                self.fig.subplots_adjust(right=0.8) # Ensure right margin is consistent
                 self.canvas.draw()
                 return 
 
@@ -495,6 +508,7 @@ class QuantizerApp:
                 quantization_levels = np.linspace(min_r, max_r, num_levels)
 
             for level in quantization_levels:
+                # Use the new light gray color for the level lines
                 self.ax.axhline(level, color=self.level_line_color, linestyle='--', linewidth=0.7, alpha=0.6)
 
             # Quantize the analog signal
@@ -506,16 +520,21 @@ class QuantizerApp:
             self.ax.step(time, quantized_signal, where='mid', color=self.quantized_line_color, label='Quantized Signal')
 
             # Mark the specific input analog voltage if within range
-            # Removed direct plot of analog_v_single_point line, using text instead for clarity
             if min_r <= analog_v_single_point <= max_r:
                  quantized_single_point = compute_quantized_value(max_r, min_r, bit_r, analog_v_single_point)
-                 # Mark input point with an 'X'
-                 self.ax.plot(time[0], analog_v_single_point, 'x', color='red', markersize=10, mew=2, label='Current Input')
-                 # Mark quantized output point with an 'O'
-                 self.ax.plot(time[0], quantized_single_point, 'o', color='yellow', markersize=10, label='Quantized Output') 
-                 self.ax.annotate(f"{quantized_single_point:.2f}V", (time[0], quantized_single_point),
-                                  textcoords="offset points", xytext=(10,10), ha='left', va='bottom', color='yellow')
-
+                 # Mark input point with an 'X' using YELLOW
+                 self.ax.plot(time[0], analog_v_single_point, 'x', color='#FFFF00', markersize=10, mew=2, label='Current Input')
+                 # Mark quantized output point with an 'O' using purple
+                 self.ax.plot(time[0], quantized_single_point, 'o', color=self.quantized_graph_output_color, markersize=10, label='Quantized Output') 
+                 
+                 # Display quantized output value below the legend
+                 text_display = f"Current Quantized Output: {quantized_single_point:.2f}V"
+                 self._quantized_output_text_label = self.ax.text(1.02, 0.7, text_display, # Adjusted y to 0.7 for ample space
+                                                                  transform=self.ax.transAxes,
+                                                                  fontsize=10, 
+                                                                  color=self.text_color, 
+                                                                  verticalalignment='top')
+                 
 
             self.ax.set_ylim(min_r - 0.1 * abs(max_r - min_r), max_r + 0.1 * abs(max_r - min_r))
             self.ax.set_xlim(0, 2 * np.pi) # Ensure x-axis limits are consistent
@@ -531,7 +550,7 @@ class QuantizerApp:
 
         # --- Legend placement (repeated after clear to ensure it's always set) ---
         self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False, labelcolor=self.text_color)
-        self.fig.subplots_adjust(right=0.75) # Adjust right margin to fit legend
+        self.fig.subplots_adjust(right=0.8) # Adjust right margin to fit legend and new text
         self.fig.tight_layout() # Call tight_layout last
         self.canvas.draw()
 
@@ -804,6 +823,8 @@ class QuantizerApp:
 
             quantized_val = compute_quantized_value(max_r, min_r, bit_r, analog_v)
 
+            # Output label will now always be yellow for values too
+            self.output_label_value.config(fg=self.quantized_value_color) 
             self.output_value_text.set(f"{quantized_val:.4f} V")
 
             if not (min_r <= analog_v <= max_r):
@@ -816,11 +837,15 @@ class QuantizerApp:
         except ValueError as e:
             messagebox.showerror("Input Error", f"Please ensure all fields have valid numbers and ranges. Details: {e}")
             self.output_value_text.set("N/A")
+            # Revert output label color to Yellow on error
+            self.output_label_value.config(fg=self.na_color) 
             self.last_calculated_params = None
             self._update_quantization_plot()
         except Exception as e:
             messagebox.showerror("Calculation Error", f"An unexpected error occurred during quantization: {e}")
             self.output_value_text.set("Error")
+            # Revert output label color to Yellow on error
+            self.output_label_value.config(fg=self.na_color) 
             self.last_calculated_params = None
             self._update_quantization_plot()
 
@@ -836,6 +861,8 @@ class QuantizerApp:
                 self.field_vars[text_field].set(5.0) # Default analog voltage
 
         self.output_value_text.set("N/A")
+        # Revert output label color to Yellow when cleared to N/A
+        self.output_label_value.config(fg=self.na_color) 
         self._hide_adjustment_buttons()
         self._hide_output_analysis_tooltip(None)
         self._hide_field_tooltip()
